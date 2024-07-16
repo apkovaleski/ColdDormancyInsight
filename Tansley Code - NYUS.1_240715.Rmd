@@ -1,0 +1,1934 @@
+---
+title: "Tansley Insight"
+author: "Al Kovaleski"
+date: "7/15/2024"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r The Model}
+library(lubridate)
+library(chillR)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(terra)
+library(sf)
+
+#Set your working directory to folder where files are located
+
+warmlength = 14 #Days of warming
+warmperiod = rep(0:(warmlength-1), each=3) #days
+warmstart = as.Date("2022-12-01")   # Use 3/1, 1/15, 12/1?
+warmtemp=15  #Maximum temperature
+warmamplitude=5 #How much lower than maximum T
+
+
+wdat=read.csv("Weather_GenevaBordeaux.csv")
+
+wdat$date=paste(wdat$day, "-",wdat$month, "-", wdat$year)
+wdat$date=gsub(' ','',wdat$date)
+wdat$date=as.Date(wdat$date, format="%d-%m-%Y")
+
+wdat$Dataset=paste((as.numeric(year(wdat$date))-1),as.numeric(year(wdat$date)),sep="-" )
+
+wdat$Dataset[month(wdat$date)>6]=paste((as.numeric(year(wdat$date[month(wdat$date)>6]))),(as.numeric(year(wdat$date[month(wdat$date)>6]))+1),sep="-" )
+
+wdat$Dataset=as.factor(wdat$Dataset)
+wdat$Location=as.factor(wdat$Location)
+
+wdat$Location=factor(wdat$Location)
+levels(wdat$Location)
+wdat$artwarm=0
+
+
+locdat=read.csv("Locations.csv")
+locdat$Location=factor(locdat$Location)
+
+
+wdat2=merge(wdat,locdat)
+
+colnames(wdat2)=c("Location","Date","Tmin","Tmax","yday","Year","Month","Day","Dataset","artwarm",
+                  "Latitude","Location2","Country")
+
+
+warmmonth=2
+warmlevel=10
+
+
+
+wdat2warm=wdat2
+
+wdat2warm$Dataset="2022-2023warm"
+
+
+# # Uneven warming
+# 
+# wdat2warm$Tmin[wdat2warm$Month == warmmonth]=wdat2warm$Tmin[wdat2warm$Month == warmmonth]+warmlevel
+# 
+# wdat2warm$Tmax[wdat2warm$Month == warmmonth]=wdat2warm$Tmax[wdat2warm$Month == warmmonth]+warmlevel
+# 
+# #Even warming
+# 
+# wdat2warm$Tmin[wdat2warm$Month == warmmonth]=warmtemp-5
+# wdat2warm$Tmax[wdat2warm$Month == warmmonth]=warmtemp
+
+
+#Period warming
+
+
+
+wdat2warm$Tmin[(which(wdat2warm$Date == warmstart)+warmperiod)]=warmtemp-warmamplitude
+wdat2warm$Tmax[(which(wdat2warm$Date == warmstart)+warmperiod)]=warmtemp
+
+wdat2warm$artwarm[(which(wdat2warm$Date == warmstart)+warmperiod)]=1
+
+
+
+wdat2=rbind(wdat2,wdat2warm)
+
+
+wdat3=NULL
+
+for (j in levels(wdat2$Location)) {
+  
+  datc=subset(wdat2, Location %in% j)
+  datc$Dataset=factor(datc$Dataset)
+
+for (i in levels(datc$Dataset)) {
+  
+  datb=subset(datc, Dataset %in% i)
+  
+  if (nrow(datb)>300) {
+
+  hourly=data.frame(stack_hourly_temps(weather=datb,latitude=mean(datb$Latitude)))
+  
+  colnames(hourly)=c("Location","Date","Tmin","Tmax","yday","Year","Month","Day","Dataset","artwarm",
+                  "Latitude","Location2","Country","JDay","Hour","Temperature","QC")
+  
+  hourly$Chill=Dynamic_Model(hourly$Temperature)
+  
+  #plot(hourly$Chill)
+  
+  wdat3=rbind(wdat3,hourly)
+  
+  print(c(i,j))
+  }
+}}
+
+
+wdat3=wdat3[c(1,2,3,4,9,10,12,13,14,18)]
+wdat3$Location2=factor(wdat3$Location2)
+wdat3$Country=factor(wdat3$Country)
+
+wdat4=aggregate(.~Date+Location+Location2+Country+Dataset,wdat3,mean)
+
+wdat2c=wdat4
+colnames(wdat2c)=c("Date", "Location","Location2", "Country","Dataset","MinC","MaxC","artwarm","JDay","Portions")
+
+
+
+
+parms=data.frame(c("Concord","Concord_10","Concord_90","Cabernet_Sauvignon","Cabernet_Sauvignon_10","Cabernet_Sauvignon_90","Riesling","Riesling_10","Riesling_90"),
+                 c(0,0,0,0,0,0,0,0,0),
+                 c(12,10,12,8,6,10,12,10,14),
+                 c(8,11,8,7,6,6,7,6,10),
+                 c(66,66,66,66,66,66,66,66,66),
+                 c(31,28,33,23,22,25,26,24,29),
+                 c(6,6,6,6,6,6,6,6,6),
+                 c(-2.1,-2.3,-2.2,-2.2,-1.7,-1.9,-1.9,-2,-1.9),
+                 c(24,24,24,22,14,24,24,14,24),
+                 c(1.9,1.9,1.9,1.8,1.7,1.7,2.2,2.2,2),
+                 c(3.5,3.5,4,5,4,5,5,5,5),
+                 c(3,3,2,6,7,4,3,3,2),
+                 c(5,4,4,3,3,3,4,5,5))
+
+
+colnames(parms)=c("Cultivar","tliml","tlimh","tlimb","tlime","m","n","b","c","kdeacc","a","slp","int")
+
+
+
+preds=NULL
+
+#### Concord predictions ####
+{
+tliml=parms$tliml[parms$Cultivar=="Concord"]
+tlimh=parms$tlimh[parms$Cultivar=="Concord"]
+tlimb=parms$tlimb[parms$Cultivar=="Concord"]
+tlime=parms$tlime[parms$Cultivar=="Concord"]
+m=parms$m[parms$Cultivar=="Concord"]
+n=parms$n[parms$Cultivar=="Concord"]
+b=parms$b[parms$Cultivar=="Concord"]
+c=parms$c[parms$Cultivar=="Concord"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Concord"]
+a=parms$a[parms$Cultivar=="Concord"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Concord"]
+int=parms$int[parms$Cultivar=="Concord"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Concord")
+preds=rbind(preds,wdatvalb)
+
+} # Concord 50
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Concord_10"]
+tlimh=parms$tlimh[parms$Cultivar=="Concord_10"]
+tlimb=parms$tlimb[parms$Cultivar=="Concord_10"]
+tlime=parms$tlime[parms$Cultivar=="Concord_10"]
+m=parms$m[parms$Cultivar=="Concord_10"]
+n=parms$n[parms$Cultivar=="Concord_10"]
+b=parms$b[parms$Cultivar=="Concord_10"]
+c=parms$c[parms$Cultivar=="Concord_10"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Concord_10"]
+a=parms$a[parms$Cultivar=="Concord_10"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Concord_10"]
+int=parms$int[parms$Cultivar=="Concord_10"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Concord_10")
+preds=rbind(preds,wdatvalb)
+
+} # Concord 10
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Concord_90"]
+tlimh=parms$tlimh[parms$Cultivar=="Concord_90"]
+tlimb=parms$tlimb[parms$Cultivar=="Concord_90"]
+tlime=parms$tlime[parms$Cultivar=="Concord_90"]
+m=parms$m[parms$Cultivar=="Concord_90"]
+n=parms$n[parms$Cultivar=="Concord_90"]
+b=parms$b[parms$Cultivar=="Concord_90"]
+c=parms$c[parms$Cultivar=="Concord_90"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Concord_90"]
+a=parms$a[parms$Cultivar=="Concord_90"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Concord_90"]
+int=parms$int[parms$Cultivar=="Concord_90"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Concord_90")
+preds=rbind(preds,wdatvalb)
+
+} # Concord 90
+
+
+#### Cab Sauv predictions ####
+
+{
+tliml=parms$tliml[parms$Cultivar=="Cabernet_Sauvignon"]
+tlimh=parms$tlimh[parms$Cultivar=="Cabernet_Sauvignon"]
+tlimb=parms$tlimb[parms$Cultivar=="Cabernet_Sauvignon"]
+tlime=parms$tlime[parms$Cultivar=="Cabernet_Sauvignon"]
+m=parms$m[parms$Cultivar=="Cabernet_Sauvignon"]
+n=parms$n[parms$Cultivar=="Cabernet_Sauvignon"]
+b=parms$b[parms$Cultivar=="Cabernet_Sauvignon"]
+c=parms$c[parms$Cultivar=="Cabernet_Sauvignon"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Cabernet_Sauvignon"]
+a=parms$a[parms$Cultivar=="Cabernet_Sauvignon"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Cabernet_Sauvignon"]
+int=parms$int[parms$Cultivar=="Cabernet_Sauvignon"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Cabernet_Sauvignon")
+preds=rbind(preds,wdatvalb)
+
+} # Cab Sauv 50
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Cabernet_Sauvignon_10"]
+tlimh=parms$tlimh[parms$Cultivar=="Cabernet_Sauvignon_10"]
+tlimb=parms$tlimb[parms$Cultivar=="Cabernet_Sauvignon_10"]
+tlime=parms$tlime[parms$Cultivar=="Cabernet_Sauvignon_10"]
+m=parms$m[parms$Cultivar=="Cabernet_Sauvignon_10"]
+n=parms$n[parms$Cultivar=="Cabernet_Sauvignon_10"]
+b=parms$b[parms$Cultivar=="Cabernet_Sauvignon_10"]
+c=parms$c[parms$Cultivar=="Cabernet_Sauvignon_10"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Cabernet_Sauvignon_10"]
+a=parms$a[parms$Cultivar=="Cabernet_Sauvignon_10"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Cabernet_Sauvignon_10"]
+int=parms$int[parms$Cultivar=="Cabernet_Sauvignon_10"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Cabernet_Sauvignon_10")
+preds=rbind(preds,wdatvalb)
+
+} # Cab Sauv 10
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Cabernet_Sauvignon_90"]
+tlimh=parms$tlimh[parms$Cultivar=="Cabernet_Sauvignon_90"]
+tlimb=parms$tlimb[parms$Cultivar=="Cabernet_Sauvignon_90"]
+tlime=parms$tlime[parms$Cultivar=="Cabernet_Sauvignon_90"]
+m=parms$m[parms$Cultivar=="Cabernet_Sauvignon_90"]
+n=parms$n[parms$Cultivar=="Cabernet_Sauvignon_90"]
+b=parms$b[parms$Cultivar=="Cabernet_Sauvignon_90"]
+c=parms$c[parms$Cultivar=="Cabernet_Sauvignon_90"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Cabernet_Sauvignon_90"]
+a=parms$a[parms$Cultivar=="Cabernet_Sauvignon_90"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Cabernet_Sauvignon_90"]
+int=parms$int[parms$Cultivar=="Cabernet_Sauvignon_90"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Cabernet_Sauvignon_90")
+preds=rbind(preds,wdatvalb)
+
+} # Cab Sauv 90
+
+#### Riesling predictions ####
+
+{
+tliml=parms$tliml[parms$Cultivar=="Riesling"]
+tlimh=parms$tlimh[parms$Cultivar=="Riesling"]
+tlimb=parms$tlimb[parms$Cultivar=="Riesling"]
+tlime=parms$tlime[parms$Cultivar=="Riesling"]
+m=parms$m[parms$Cultivar=="Riesling"]
+n=parms$n[parms$Cultivar=="Riesling"]
+b=parms$b[parms$Cultivar=="Riesling"]
+c=parms$c[parms$Cultivar=="Riesling"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Riesling"]
+a=parms$a[parms$Cultivar=="Riesling"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Riesling"]
+int=parms$int[parms$Cultivar=="Riesling"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Riesling")
+preds=rbind(preds,wdatvalb)
+
+} # Riesling 50
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Riesling_10"]
+tlimh=parms$tlimh[parms$Cultivar=="Riesling_10"]
+tlimb=parms$tlimb[parms$Cultivar=="Riesling_10"]
+tlime=parms$tlime[parms$Cultivar=="Riesling_10"]
+m=parms$m[parms$Cultivar=="Riesling_10"]
+n=parms$n[parms$Cultivar=="Riesling_10"]
+b=parms$b[parms$Cultivar=="Riesling_10"]
+c=parms$c[parms$Cultivar=="Riesling_10"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Riesling_10"]
+a=parms$a[parms$Cultivar=="Riesling_10"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Riesling_10"]
+int=parms$int[parms$Cultivar=="Riesling_10"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Riesling_10")
+preds=rbind(preds,wdatvalb)
+
+} # Riesling 10
+
+
+{
+tliml=parms$tliml[parms$Cultivar=="Riesling_90"]
+tlimh=parms$tlimh[parms$Cultivar=="Riesling_90"]
+tlimb=parms$tlimb[parms$Cultivar=="Riesling_90"]
+tlime=parms$tlime[parms$Cultivar=="Riesling_90"]
+m=parms$m[parms$Cultivar=="Riesling_90"]
+n=parms$n[parms$Cultivar=="Riesling_90"]
+b=parms$b[parms$Cultivar=="Riesling_90"]
+c=parms$c[parms$Cultivar=="Concord_90"]
+kdeacc=parms$kdeacc[parms$Cultivar=="Riesling_90"]
+a=parms$a[parms$Cultivar=="Riesling_90"]
+Tmax=40
+Topt=25
+slp=parms$slp[parms$Cultivar=="Riesling_90"]
+int=parms$int[parms$Cultivar=="Riesling_90"]
+
+
+wdat2c$kdeacc=(0.00*wdat2c$MaxC + 0.00*wdat2c$MinC)
+
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC>0]= ((kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt)))))+(kdeacc*(((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MinC[wdat2c$MaxC>0 & wdat2c$MinC>0])/(Tmax-Topt))))))/2
+
+
+wdat2c$kdeacc[wdat2c$MaxC>0 & wdat2c$MinC<=0]=(kdeacc*(((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt))^a) *exp(a*( 1-((Tmax-wdat2c$MaxC[wdat2c$MaxC>0 & wdat2c$MinC<=0])/(Tmax-Topt)))))/2
+
+
+
+
+wdat2c$kdeacc[wdat2c$kdeacc<0]=0
+
+wdat2c$Deaccpot=1/(1+exp((-tlimb)*(log(wdat2c$Portions)- log(tlime))))
+
+
+wdat2c$deacc=wdat2c$Deaccpot*(wdat2c$kdeacc)
+
+
+
+wdat2c$CH=-n
+
+
+Time=seq(0.1,500,0.1)
+
+Resp=1/(1+exp(b*(log(Time)-log(c))))
+
+
+test=data.frame(Time, Resp)
+
+
+wdat2c$CHmax=0
+
+wdat2c$sumdeacc=0
+
+wdatvalb=NULL
+
+
+for (loc in levels(wdat2c$Location)) {
+  
+  wdatvalsubc=subset(wdat2c, Location %in% loc)
+  wdatvalsubc$Dataset=factor(wdatvalsubc$Dataset)
+
+for (y in levels(factor(wdatvalsubc$Dataset))) {
+
+
+wdatvalsubb=subset(wdatvalsubc, Dataset %in% y)
+wdatvalsubb$month=month(wdatvalsubb$Date)
+wdatvalsub=subset(wdatvalsubb, month %in% c(9,10,11,12,1,2,3,4,5,6))
+wdatvalsub$acc=0
+
+for (t in 2:nrow(wdatvalsub)) {
+
+wdatvalsub$sumdeacc[t]=wdatvalsub$sumdeacc[t-1]+wdatvalsub$kdeacc[t]*wdatvalsub$Deaccpot[t]
+
+
+}
+
+
+rownames(wdatvalsub)=NULL
+
+wdatvalsub$tlim=tliml+((tlimh-tliml)/(1+exp(tlimb*(log(wdatvalsub$Portions)-log(tlime)) )) )
+
+
+
+for (u in (2):nrow(wdatvalsub)) {
+
+if (wdatvalsub$MinC[u]<wdatvalsub$tlim[u]) {
+
+Tmin=wdatvalsub$MinC[u]
+Tlimmin=wdatvalsub$tlim[u]
+
+CHmax= -(n+(m-n)/(1+exp(-slp*(log(-Tmin+Tlimmin)-log(int)))))
+
+lev=wdatvalsub$CH[u-1]/CHmax
+
+if (lev>1) {
+lev=1
+CHmax=CHmax
+}
+
+
+
+
+
+} else {
+lev=1
+CHmax=-n
+}
+
+
+j=min(which(abs(lev-test$Resp)==min(abs(lev-test$Resp))))
+
+ti=test$Time[j]
+
+u2=u-1
+
+
+wdatvalsub$acc[u]=(CHmax+n)*(0.001+(((exp(b * (log(ti) - log(c))))* ((-b) * (1/ti)))/((1+exp(b * (log(ti) - log(c))))^2)))
+
+wdatvalsub$CH[u]=wdatvalsub$CH[u2]+wdatvalsub$acc[u]+wdatvalsub$deacc[u]
+
+
+}
+
+
+wdatvalb=rbind(wdatvalb, wdatvalsub)
+
+
+
+}}
+
+wdatvalb$Cultivar=as.factor("Riesling_90")
+preds=rbind(preds,wdatvalb)
+} # Riesling 90
+
+
+preds$CH2=preds$CH
+preds$CH2[preds$CH2>(0)]=0
+
+
+
+
+
+p=NULL
+
+
+for (cult in levels(preds$Cultivar)) {
+
+  predssubc=subset(preds, Cultivar %in% cult)
+  predssubc$Location=factor(predssubc$Location)
+  
+
+for (loc in levels(predssubc$Location)) {
+  
+  predssuba=subset(predssubc, Location %in% loc)
+  predssuba$Dataset=factor(predssuba$Dataset)
+
+for (y in levels(factor(predssuba$Dataset))) {
+
+
+predssubb=subset(predssuba, Dataset %in% y)
+
+predssubb$try=abs(predssubb$CH-10)
+
+if (cult=="Concord") {
+  predssubb$try=abs(predssubb$CH-5)
+  
+  }else {if (cult == "Concord_10") {
+    predssubb$try=abs(predssubb$CH-5)
+    } else  {if (cult == "Concord_90") {
+      predssubb$try=abs(predssubb$CH-5)
+    } else { if (loc == "Bordeaux") {
+        predssubb$try=abs(predssubb$CH-0)
+      } else {predssubb$try=abs(predssubb$CH-10)} } }}
+
+
+#else if(loc == "Bordeaux"){predssubb$try=abs(predssubb$CH-0)}
+
+p=rbind(p,c(min(predssubb$JDay[which(predssubb$try==min(predssubb$try))]), loc, y,as.character(predssubb$Cultivar[which(predssubb$try==min(predssubb$try))])[1] )   )
+
+}}}
+
+
+#if (cult=="Concord") {predssubb$try=abs(predssubb$CH-5)} else {
+#predssubb$try=abs(predssubb$CH-10)}
+
+p=data.frame(p)
+colnames(p)=c("BBpred","Location","Dataset","Cultivar")
+
+p$BBpred=as.numeric(p$BBpred)
+p$Location=factor(p$Location)
+p$Dataset=factor(p$Dataset)
+p$Cultivar=factor(p$Cultivar)
+
+
+predsCon50=subset(preds, Cultivar %in% c("Riesling"))
+predsCon10=subset(preds, Cultivar %in% c("Riesling_10"))
+predsCon90=subset(preds, Cultivar %in% c("Riesling_90"))
+
+
+colnames(predsCon10)[colnames(predsCon10) == 'CH2'] <- 'CH10'
+colnames(predsCon90)[colnames(predsCon90) == 'CH2'] <- 'CH90'
+
+predsCon10$Cultivar = as.factor("Riesling")
+predsCon90$Cultivar = as.factor("Riesling")
+predsCon50$Cultivar = as.factor("Riesling")
+
+predsfinal=cbind(cbind(predsCon50, predsCon90[21]),predsCon10[21])
+
+
+pal2=c( "#edae49","#66a182")
+
+predsfinal$Location=factor(predsfinal$Location)
+  
+
+ggplot()+
+  geom_ribbon(aes(x=Date,ymax=CH10,ymin=CH90,group=Dataset, fill=Dataset), data=subset(predsfinal,Dataset=="2022-2023warm"), alpha=0.2)+
+  geom_ribbon(aes(x=Date,ymax=CH10,ymin=CH90,group=Dataset, fill=Dataset), subset(predsfinal,Dataset=="2022-2023"), alpha=0.4)+
+  geom_line(aes(x=Date,y=CH2,group=Dataset, col=Dataset),data=(subset(predsfinal,Dataset=="2022-2023warm")), size=0.3)+
+  geom_line(aes(x=Date,y=CH2,group=Dataset, col=Dataset),data=(subset(predsfinal,Dataset=="2022-2023")), size=0.3)+
+  geom_ribbon(aes(x=Date,ymax=MaxC,ymin=MinC), data=subset(predsfinal,Dataset=="2022-2023"), fill="#656565", alpha=0.3)+
+  geom_ribbon(aes(x=Date,ymax=Tmax,ymin=Tmin), data=subset(subset(wdat2,Dataset=="2022-2023warm"), artwarm==1), fill="#edae49",lty=1, lwd=0.1, alpha=0.6)+
+  geom_ribbon(aes(x=Date,ymax=-30,ymin=-40), data=subset(subset(wdat2,Dataset=="2022-2023warm"), artwarm==1), fill="#edae49",lty=1, lwd=0.1, alpha=0.6)+
+  geom_ribbon(aes(x=Date,ymax=MaxC,ymin=MinC), data=(subset(predsfinal,Dataset=="2022-2023warm")), color="#656565", fill="white",lty=1, lwd=0.15, alpha=0)+
+  geom_abline(slope=0,intercept=0, linewidth=0.15, col="black")+
+  geom_line(aes(x=Date,y=Portions/3,group=Dataset, col=Dataset),data=subset(predsfinal,Dataset=="2022-2023warm"), size=0.3)+
+  geom_line(aes(x=Date,y=Portions/3,group=Dataset, col=Dataset),data=subset(predsfinal,Dataset=="2022-2023"), size=0.3)+
+  scale_color_manual(values=pal2)+
+  scale_fill_manual(values=pal2)+
+  scale_y_continuous(limits=c(-40,45),breaks=seq(-30,40,10), expand=c(0,0), sec.axis = sec_axis(~ .*3, breaks=c(0,30,60,90,120,150), name="Chill accumulation (portions)"))+
+  xlab("")+ylab("Temperature (°C)")+
+  scale_x_date(date_breaks="1 month", date_labels = "%b")+
+  facet_wrap(.~(Location), ncol=1,scales="free")+
+  theme_bw(base_size=7) +
+  theme(legend.position = "none",
+        strip.text = element_blank(),
+        strip.background = element_rect(color="white", fill="white"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size=0.3,color="black"),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text = element_text(size=7, color="black"),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(-0.3, 'lines'),
+        axis.text.x = element_text(color=c("black"), angle=0,vjust=0, hjust=0.5),
+        panel.spacing = unit(1, "lines"))+
+ coord_cartesian(ylim = c(-35, 45), default = FALSE, clip = "on")
+
+#p1+p2+p3 #Save 8x4 #Change dates for warming periods and name plot above depending on time for this to run properly
+
+
+
+
+```
+
+
+
+```{r Chill models}
+library(dplyr)
+library(rms)
+library(ggcorrplot)
+
+world <- read_sf("ne_50m_admin_0_countries/ne_50m_admin_0_countries.shp")
+stateprov <- read_sf("ne_10m_admin_1_states_provinces/ne_10m_admin_1_states_provinces.shp")
+lakes <- read_sf("GL240425_lam/GL240425_lam.shp")
+ny <- subset(stateprov, name %in% "New York")
+guiana <- subset(stateprov, name %in% "Guyane française")
+countries <- subset(world, ADMIN %in% c("France", "Brazil", "United States of America"))
+# "world" and "stateprov" shapefiles come from Natural Earth (naturalearthdata.com)
+# "lakes" shapefiles (great lakes only) from US National Ice Center (usicecenter.gov)
+
+world.map <- ggplot()+
+  geom_sf(data = world, fill = "#eeeeee", color = "black")+
+
+  geom_sf(data = countries, fill = "#f2ebcc", color = "black")+
+    geom_sf(data = lakes, fill = "white", color = "black")+
+  geom_sf(data = guiana, fill = "#eeeeee", color = "black")+
+  geom_point(aes(x = -51.50, y = -29.17), color = "#ff8a62", size = 1.5)+
+  geom_point(aes(x = -0.58, y = 44.79), color = "#ff8a62", size = 1.5)+
+  geom_point(aes(x = -76.99, y = 42.87), color = "#ff8a62", size = 1.5)+
+  geom_hline(yintercept=0,color="black", lwd=0.25)+
+  geom_hline(yintercept=23.44,color="black", lwd=0.25, lty=2)+
+  geom_hline(yintercept=-23.44,color="black", lwd=0.25, lty=2)+
+  xlab("")+
+  ylab("")+
+  theme(panel.background = element_rect(fill="white"),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        panel.border = element_blank())+
+  coord_sf(xlim = c(-120,50), ylim = c(-32, 50), expand = TRUE, default = FALSE, clip = "on")
+
+#world.map
+
+
+
+
+datport=NULL
+for (i in seq(-20,25,0.5)) {
+  
+  HourTemp=rep(i, 24*50)
+  port=max(Dynamic_Model(HourTemp))
+  Utah=sign(max(Utah_Model(HourTemp)))*max(abs(Utah_Model(HourTemp)))
+  
+  
+  datport=rbind(datport,c(i,port,Utah))
+  
+  
+}
+
+datport=data.frame(datport)
+
+colnames(datport)=c("Temperature","Portions","Utah")
+
+datport$Utah=datport$Utah/max(datport$Utah)
+datport$Portions=datport$Portions/max(datport$Portions)
+
+
+data_NorthCarolina <- data.frame(NC_temperature = c(-1.1, 1.6, 7.2, 13, 16.5, 19, 20.7, 22.1, 23.3),
+                                 NC_chill.units = c(0, 0.5, 1, 0.5, 0, -0.5, -1, -1.5, -2))
+ 
+#create a lm with splines for Temp; as well as vector with predicted values
+spline.mod <- lm(NC_chill.units ~ rcs(NC_temperature, c(-1.1, 1.6, 7.2, 13, 16.5, 19, 20.7, 22.1, 23.3)), data=data_NorthCarolina)
+NC_spline <- data.frame(NC_temperature=seq(-1.1,23.3, by=0.1))
+NC_spline <- NC_spline %>%
+  mutate(spline.fit = predict(spline.mod, newdata = NC_spline))
+
+
+kmax=1
+Tmax=16
+Topt=13
+a=0.5
+
+
+datport2=data.frame(Temperature=seq(-20,25,0.1))
+
+datport2$CD1=1
+datport2$CD1[datport2$Temperature>5]=0
+
+datport2$TC=0
+datport2$TC[datport2$Temperature>-3.4]=(datport2$Temperature[datport2$Temperature>-3.4]+3.4)/(5+3.4)
+datport2$TC[datport2$Temperature>5]=(datport2$Temperature[datport2$Temperature>5]-10.4)/(5-10.4)
+datport2$TC[datport2$Temperature>10.4]=0
+
+datport2$UniForc1=2/(1+exp((0.07613*((datport2$Temperature-(4.2))^2))+(0.0000086*(datport2$Temperature-(4.2)))))
+
+datport2$UniForc2=1/(1+exp((0.5*((datport2$Temperature-(5))^2))+(50*(datport2$Temperature-(5)))))
+
+
+
+
+
+wdatchill=subset(wdat, artwarm=0)
+
+wdatchill=merge(wdatchill,locdat)
+
+colnames(wdatchill)=c("Location","Date","Tmin","Tmax","yday","Year","Month","Day","Dataset","artwarm",
+                  "Latitude","Location2","Country")
+
+
+wdatchill2=NULL
+
+for (j in levels(factor(wdatchill$Location))) {
+  
+  datc=subset(wdatchill, Location %in% j)
+  datc$Dataset=factor(datc$Dataset)
+
+for (i in levels(datc$Dataset)) {
+  
+  datb=subset(datc, Dataset %in% i)
+  
+  if (nrow(datb)>300) {
+
+  hourly=data.frame(stack_hourly_temps(weather=datb,latitude=mean(datb$Latitude)))
+  
+  colnames(hourly)=c("Location","Date","Tmin","Tmax","yday","Year","Month","Day","Dataset","artwarm",
+                  "Latitude","Location2","Country","JDay","Hour","Temperature","QC")
+  
+  hourly$Chill=Dynamic_Model(hourly$Temperature)
+  
+  hourly$Utah=Utah_Model(hourly$Temperature)
+  hourly$Utah=hourly$Utah-mean(min(hourly$Utah))
+  hourly$Utah[0:which.min(hourly$Utah)]=0
+  hourly$Utah[which.max(hourly$Utah):nrow(hourly)]=mean(max(hourly$Utah))
+  
+  
+  hourly$NC_temperature=hourly$Temperature
+  
+  hourly$NC=(predict(spline.mod, newdata = hourly))
+  hourly$NC[hourly$NC_temperature< -1.1]=0
+  hourly$NC=cumsum(hourly$NC)
+  
+  hourly$NC=hourly$NC-mean(min(hourly$NC))
+  hourly$NC[0:which.min(hourly$NC)]=0
+  hourly$NC[which.max(hourly$NC):nrow(hourly)]=mean(max(hourly$NC))
+  
+  
+  hourly$UniForc1=cumsum(2/(1+exp((0.07613*((hourly$Temperature-(4.2))^2))+(0.0000086*(hourly$Temperature-(4.2))))))
+  
+  hourly$UniForc2=cumsum(1/(1+exp((0.5*((hourly$Temperature-(5))^2))+(50*(hourly$Temperature-(5))))))
+  
+  
+  hourly$UtahN=hourly$Utah/max(hourly$Utah)
+  hourly$NCN=hourly$NC/max(hourly$NC)
+  hourly$ChillN=hourly$Chill/max(hourly$Chill)
+  hourly$UniForc1N=hourly$UniForc1/max(hourly$UniForc1)
+  hourly$UniForc2N=hourly$UniForc2/max(hourly$UniForc2)
+  
+  
+  
+  #plot(hourly$Chill)
+  
+  wdatchill2=rbind(wdatchill2,hourly)
+  
+  print(c(i,j))
+  }
+}}
+
+
+
+wdatchill2$Date=as.POSIXct(wdatchill2$Date)
+wdatchill2=subset(wdatchill2, Month %in% c(9,10,11,12,1,2,3,4,5,6))
+
+wdatchill2b=wdatchill2[,c(1,2,3,4,9,18,19,21,22,23,24,25,26,27,28)]
+
+wdatchill2b=aggregate(.~Location+Date+Dataset,wdatchill2b,mean)
+
+
+wdatchill3=wdatchill2b[,c(1,10,6,7,8,9)]
+
+
+
+wdatvac=read.csv("Weather_Bento.csv")
+wdatvac$Date=gsub('2022','22',wdatvac$Date)
+
+wdatvacc=aggregate(Temperature~Date,wdatvac,min)
+wdatvacd=aggregate(Temperature~Date,wdatvac,max)
+
+colnames(wdatvacc)=c("Date","Tmin")
+colnames(wdatvacd)=c("Date","Tmax")
+
+wdatvac3=merge(wdatvacc,wdatvacd)
+wdatvac3$Date=as.Date(wdatvac3$Date, format="%d/%m/%y")
+
+
+wdatvac$DateTime=paste(wdatvac$Date, wdatvac$Hour)
+wdatvac$DateTime=as.POSIXct(wdatvac$DateTime, format="%d/%m/%y %H")
+
+wdatvac$Chill=Dynamic_Model(wdatvac$Temperature)
+  
+wdatvac$Utah=Utah_Model(wdatvac$Temperature)
+wdatvac$Utah=wdatvac$Utah-mean(min(wdatvac$Utah[0:5000]))
+wdatvac$Utah[0:which.min(wdatvac$Utah[0:5000])]=0
+wdatvac$Utah[6400:nrow(wdatvac)]=wdatvac$Utah[6399]
+  
+  
+wdatvac$NC_temperature=wdatvac$Temperature
+
+wdatvac$NC=(predict(spline.mod, newdata = wdatvac))
+wdatvac$NC[wdatvac$NC_temperature< -1.1]=0
+wdatvac$NC=cumsum(wdatvac$NC)
+
+wdatvac$NC=wdatvac$NC-mean(min(wdatvac$NC[0:5000]))
+wdatvac$NC[0:which.min(wdatvac$NC[0:5000])]=0
+wdatvac$NC[which.max(wdatvac$NC):nrow(wdatvac)]=mean(max(wdatvac$NC))
+  
+  
+wdatvac$UniForc1=cumsum(2/(1+exp((0.07613*((wdatvac$Temperature-(4.2))^2))+(0.0000086*(wdatvac$Temperature-(4.2))))))
+  
+wdatvac$UniForc2=cumsum(1/(1+exp((0.5*((wdatvac$Temperature-(5))^2))+(50*(wdatvac$Temperature-(5))))))
+  
+  
+wdatvac$UtahN=wdatvac$Utah/max(wdatvac$Utah)
+wdatvac$NCN=wdatvac$NC/max(wdatvac$NC)
+wdatvac$ChillN=wdatvac$Chill/max(wdatvac$Chill)
+wdatvac$UniForc1N=wdatvac$UniForc1/max(wdatvac$UniForc1)
+wdatvac$UniForc2N=wdatvac$UniForc2/max(wdatvac$UniForc2)
+
+wdatvac=subset(wdatvac, month(wdatvac$DateTime)>2)
+
+wdatvac=subset(wdatvac, month(wdatvac$DateTime)<12)
+
+wdatvac2=wdatvac[,c(10,5,6,8,9)]
+wdatvac2$Location="Vacaria"
+
+wdatchill3v=rbind(wdatchill3, wdatvac2[,c(6,1,2,3,4,5)])
+
+
+correlation_matrix <- round(cor(wdatchill3v[,c(2:6)]),2) 
+
+rownames(correlation_matrix)=c("UF2","Dyn","UT","NC","UF1")
+colnames(correlation_matrix)=c("UF2","Dyn","UT","NC","UF1")
+
+correlation_matrixG <- round(cor(subset(wdatchill3, Location %in% "Geneva_NY")[,c(2:6)]),2) 
+correlation_matrixB <- round(cor(subset(wdatchill3, Location %in% "Bordeaux_2")[,c(2:6)]),2) 
+correlation_matrixV <- round(cor(wdatvac[,c(10,5,6,8,9)]),2) 
+
+
+rownames(correlation_matrixG)=c("a","b","c","d","e")
+colnames(correlation_matrixG)=c("a","b","c","d","e")
+
+rownames(correlation_matrixB)=c("a","b","c","d","e")
+colnames(correlation_matrixB)=c("a","b","c","d","e")
+
+rownames(correlation_matrixB)=c("a","b","c","d","e")
+colnames(correlation_matrixB)=c("a","b","c","d","e")
+
+
+# Visualizing the correlation matrix using  
+# square and circle methods 
+
+
+p3=ggcorrplot(correlation_matrix, method ="square", type="lower",lab=T, lab_size=2, digits=2 , lab_col="white", colors=c("#d1495b","white","#3C5F87"))+
+  scale_y_discrete(position="right")+
+  scale_x_discrete(position="bottom")+
+  theme(legend.position = "none",
+        strip.background = element_rect(color="white"),
+        panel.grid = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_text(size=7, color="black", angle=0,vjust=0.5, hjust=1),
+        axis.text.x = element_text(size=7, color="black", angle=0,vjust=0, hjust=0.5),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(0.3, 'lines'))+
+    coord_cartesian(expand = F, default = FALSE, clip = "on")
+
+p3a=ggcorrplot(correlation_matrixG, method ="square", type="lower",lab=F, lab_size=0, digits=2 , lab_col="white", colors=c("#d1495b","white","#3C5F87"))+
+  scale_y_discrete(position="right", labels=NULL)+
+  scale_x_discrete(position="bottom", labels=NULL)+
+  theme(legend.position = "none",
+        strip.background = element_rect(color="white"),
+        panel.grid = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_text(size=7, color="black", angle=0,vjust=0.5, hjust=1),
+        axis.text.x = element_text(size=7, color="black", angle=0,vjust=0, hjust=0.5),
+        axis.ticks = element_blank(),
+        axis.ticks.length = unit(0.3, 'lines'))+
+    coord_cartesian(expand = F, default = FALSE, clip = "on")
+
+
+p3b=ggcorrplot(correlation_matrixB, method ="square", type="lower",lab=F, lab_size=0, digits=2 , lab_col="white", colors=c("#d1495b","white","#3C5F87"))+
+  scale_y_discrete(position="right", labels=NULL)+
+  scale_x_discrete(position="bottom", labels=NULL)+
+  theme(legend.position = "none",
+        strip.background = element_rect(color="white"),
+        panel.grid = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_text(size=7, color="black", angle=0,vjust=0.5, hjust=1),
+        axis.text.x = element_text(size=7, color="black", angle=0,vjust=0, hjust=0.5),
+        axis.ticks = element_blank(),
+        axis.ticks.length = unit(0.3, 'lines'))+
+    coord_cartesian(expand = F, default = FALSE, clip = "on")
+
+p3c=ggcorrplot(correlation_matrixV, method ="square", type="lower",lab=F, lab_size=0, digits=2 , lab_col="white", colors=c("#d1495b","white","#3C5F87"))+
+  scale_y_discrete(position="right", labels=NULL)+
+  scale_x_discrete(position="bottom", labels=NULL)+
+  theme(legend.position = "none",
+        strip.background = element_rect(color="white"),
+        panel.grid = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_text(size=7, color="black", angle=0,vjust=0.5, hjust=1),
+        axis.text.x = element_text(size=7, color="black", angle=0,vjust=0, hjust=0.5),
+        axis.ticks = element_blank(),
+        axis.ticks.length = unit(0.3, 'lines'))+
+    coord_cartesian(expand = F, default = FALSE, clip = "on")
+
+
+p2a=ggplot(data=subset(wdatchill2b, Location %in% "Geneva_NY"))+
+  geom_line(aes(x=Date, y=UtahN), lwd=0.4, col="#b24745")+
+  geom_line(aes(x=Date, y=NCN), lwd=0.4, col="#edae49")+
+  geom_line(aes(x=Date, y=UniForc1N), lwd=0.4, col="#00798c")+
+  geom_line(aes(x=Date, y=UniForc2N), lwd=0.4, col="#2e4057")+
+  geom_line(aes(x=Date, y=ChillN),  lwd=0.4, col="#79af97")+
+  #geom_line(data=datport2, aes(x=Temperature, y=TC), lwd=0.5, col="#1B9E77")+
+  
+  scale_x_datetime(date_breaks="1 month", date_labels = "%b")+
+  scale_y_continuous(expand=c(0,0.1), labels = c(0,25,50,75,100))+
+  
+  xlab("Month")+ylab("Chill accumulation (%)")+
+  theme_bw(base_size=7) +
+  theme(legend.position = "none",
+        strip.text = element_blank(),
+        strip.background = element_rect(color="white", fill="white"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size=0.3,color="black"),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text = element_text(size=7, color="black"),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(-0.3, 'lines'),
+        axis.text.x = element_text(color=c("black"), angle=0,vjust=0, hjust=0.5))+
+      coord_cartesian(ylim=c(0,1.01),expand = T, default = FALSE, clip = "on")
+
+
+p2b=ggplot(data=subset(wdatchill2b, Location %in% "Bordeaux_2"))+
+  geom_line(aes(x=Date, y=UtahN), lwd=0.4, col="#b24745")+
+  geom_line(aes(x=Date, y=NCN), lwd=0.4, col="#edae49")+
+  geom_line(aes(x=Date, y=UniForc1N), lwd=0.4, col="#00798c")+
+  geom_line(aes(x=Date, y=UniForc2N), lwd=0.4, col="#2e4057")+
+  geom_line(aes(x=Date, y=ChillN),  lwd=0.4, col="#79af97")+
+  #geom_line(data=datport2, aes(x=Temperature, y=TC), lwd=0.5, col="#1B9E77")+
+  
+  scale_x_datetime(date_breaks="1 month", date_labels = "%b")+
+  scale_y_continuous(expand=c(0,0.1), labels = c(0,25,50,75,100))+
+  
+  xlab("Month")+ylab("Chill accumulation (%)")+
+  theme_bw(base_size=7) +
+  theme(legend.position = "none",
+        strip.text = element_blank(),
+        strip.background = element_rect(color="white", fill="white"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size=0.3,color="black"),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text = element_text(size=7, color="black"),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(-0.3, 'lines'),
+        axis.text.x = element_text(color=c("black"), angle=0,vjust=0, hjust=0.5))+
+      coord_cartesian(ylim=c(0,1.01),expand = T, default = FALSE, clip = "on")
+
+
+p2c=ggplot(data=wdatvac)+
+  geom_line(aes(x=DateTime, y=UtahN), lwd=0.4, col="#b24745")+
+  geom_line(aes(x=DateTime, y=NCN), lwd=0.4, col="#edae49")+
+  geom_line(aes(x=DateTime, y=UniForc1N), lwd=0.4, col="#00798c")+
+  geom_line(aes(x=DateTime, y=UniForc2N), lwd=0.4, col="#2e4057")+
+  geom_line(aes(x=DateTime, y=ChillN),  lwd=0.4, col="#79af97")+
+  #geom_line(data=datport2, aes(x=Temperature, y=TC), lwd=0.5, col="#1B9E77")+
+  
+  scale_x_datetime(date_breaks="1 month", date_labels = "%b")+
+  scale_y_continuous(expand=c(0,0.1), labels = c(0,25,50,75,100))+
+  
+  xlab("Month")+ylab("Chill accumulation (%)")+
+  theme_bw(base_size=7) +
+  theme(legend.position = "none",
+        strip.text = element_blank(),
+        strip.background = element_rect(color="white", fill="white"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size=0.3,color="black"),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text = element_text(size=7, color="black"),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(-0.3, 'lines'),
+        axis.text.x = element_text(color=c("black"), angle=0,vjust=0, hjust=0.5))+
+      coord_cartesian(ylim=c(0,1.01),expand = T, default = FALSE, clip = "on")
+
+
+p1=ggplot()+
+  geom_line(data=NC_spline, aes(x=NC_temperature, y=spline.fit), lwd=0.4, col="#edae49")+
+  geom_line(data=datport, aes(x=Temperature, y=Utah), lwd=0.4,col="#b24745")+
+  geom_line(data=datport2, aes(x=Temperature, y=UniForc1), lwd=0.4, col="#00798c")+
+  geom_line(data=datport2, aes(x=Temperature, y=UniForc2), lwd=0.4, col="#2e4057")+
+  geom_line(data=datport, aes(x=Temperature, y=Portions), lwd=0.4,col="#79af97" )+
+
+  scale_x_continuous(limits=c(-10,22), expand=c(0,0), breaks=c(-10,-5,0,5,10,15,20))+
+  scale_y_continuous(limits=c(-1.25,1.1), expand=c(0,0), breaks=c(-0.25,0,0.25,0.5,0.75,1))+
+  
+  xlab("Temperature (°C)")+ylab("Efficiency")+
+  theme_bw(base_size=7) +
+  theme(legend.position = "none",
+        strip.text = element_blank(),
+        strip.background = element_rect(color="white", fill="white"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size=0.3,color="black"),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text = element_text(size=7, color="black"),
+        axis.ticks = element_line(size=0.15,color="black"),
+        axis.ticks.length = unit(-0.3, 'lines'),
+        axis.text.x = element_text(color=c("black"), angle=0,vjust=0, hjust=0.5))+
+  coord_cartesian(xlim = c(-12,22), ylim = c(-0.35, 1.1), expand = TRUE, default = FALSE, clip = "on")
+
+
+p4=p1+p2b+p2a+p3+plot_layout(ncol=4)
+
+#p4/p4 #Export 7.2x4
+
+
+p2aplus=p2a+inset_element(p3a,0.5,0.05,1,0.55) #left, bottom, right, top
+p2bplus=p2b+inset_element(p3b,0.5,0.05,1,0.55) #left, bottom, right, top
+p2cplus=p2c+inset_element(p3c,0.5,0.05,1,0.55) #left, bottom, right, top
+
+
+p4btop=(p1+world.map)+plot_layout(widths = c(1.8,2.2))
+p4bbottom=p2bplus+p2aplus+p2cplus+p3+plot_layout(ncol=4)
+
+p4btop/p4bbottom  #Export 7.2x4
+
+
+```
